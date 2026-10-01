@@ -11,6 +11,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Optional. When both repository secrets are set, the image is also
+      # pushed to Docker Hub as <username>/tunarr:concat-fix.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
 
@@ -34,6 +39,14 @@ jobs:
             exec_target=linux-x64
           tags: tunarr:concat-fix
           outputs: type=docker,dest=${{ runner.temp }}/tunarr-concat-fix.tar
+
+      - name: Push to Docker Hub
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        run: |
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          docker load -i "${{ runner.temp }}/tunarr-concat-fix.tar"
+          docker tag tunarr:concat-fix "$DOCKERHUB_USERNAME/tunarr:concat-fix"
+          docker push "$DOCKERHUB_USERNAME/tunarr:concat-fix"
 
       - name: Compress
         run: gzip -1 "${{ runner.temp }}/tunarr-concat-fix.tar"
