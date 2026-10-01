@@ -1,5 +1,6 @@
 import { container } from '@/container.js';
 import { FfmpegText } from '@/ffmpeg/ffmpegText.js';
+import { buildConcatPlaylist } from '@/stream/ConcatPlaylist.js';
 import { VideoStream } from '@/stream/VideoStream.js';
 import { TruthyQueryParam } from '@/types/schemas.js';
 import type { RouterPluginAsyncCallback } from '@/types/serverType.js';
@@ -213,21 +214,14 @@ export const videoApiRouter: RouterPluginAsyncCallback = async (fastify) => {
       },
     },
     async (req, res) => {
-      const lines = ['ffconcat version 1.0'];
+      const url = makeLocalUrl('/stream', {
+        channel: req.query.channel,
+        audioOnly: req.query.audioOnly,
+        mode: req.query.mode,
+        token: req.query.token,
+      });
 
-      const audioOnly = req.query.audioOnly;
-      for (let i = 0; i < 2; i++) {
-        const url = makeLocalUrl('/stream', {
-          channel: req.query.channel,
-          audioOnly,
-          mode: req.query.mode,
-          token: req.query.token,
-        });
-
-        lines.push(`file '${url}'`);
-      }
-
-      return res.type('text').send(lines.join('\n'));
+      return res.type('text').send(buildConcatPlaylist(url));
     },
   );
 };

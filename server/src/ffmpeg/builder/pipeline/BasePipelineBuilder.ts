@@ -261,10 +261,11 @@ export abstract class BasePipelineBuilder implements PipelineBuilder {
       ClosedGopOutputOption(),
     ];
 
+    // Never loop the concat input. The playlist is long instead; see
+    // ConcatPlaylistEntryCount for why looping breaks timestamps.
     input.addOptions(
       new ConcatInputFormatOption(),
       new ReadrateInputOption(this.ffmpegCapabilities, 0),
-      new InfiniteLoopInputOption(),
       new UserAgentInputOption(`Ffmpeg Tunarr/${getTunarrVersion()}`),
     );
 
