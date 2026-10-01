@@ -11,6 +11,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     env:
       # Optional. When both repository secrets are set, the image is also
       # pushed to Docker Hub as <username>/tunarr:concat-fix.
@@ -38,7 +41,17 @@ jobs:
             tunarr_build=${{ env.TUNARR_BUILD }}
             exec_target=linux-x64
           tags: tunarr:concat-fix
+          # Links the GHCR package to this repo so it shows on the repo page.
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           outputs: type=docker,dest=${{ runner.temp }}/tunarr-concat-fix.tar
+
+      - name: Push to GitHub Container Registry
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/tunarr:concat-fix"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker load -i "${{ runner.temp }}/tunarr-concat-fix.tar"
+          docker tag tunarr:concat-fix "$image"
+          docker push "$image"
 
       - name: Push to Docker Hub
         if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
