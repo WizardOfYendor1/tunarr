@@ -1,0 +1,46 @@
+# Builds a linux/amd64 test image of this branch and attaches it to the run as
+# a `docker load`-able tar. Not for release; delete with the branch.
+name: Test image (mpegts concat fix)
+
+on:
+  push:
+    branches:
+      - test-image/mpegts-concat-fix
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set version
+        run: echo "TUNARR_BUILD=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image tar
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          target: full-stack
+          build-args: |
+            base_image_tag=7.1.1
+            is_edge_build=false
+            tunarr_version=concat-fix
+            tunarr_build=${{ env.TUNARR_BUILD }}
+            exec_target=linux-x64
+          tags: tunarr:concat-fix
+          outputs: type=docker,dest=${{ runner.temp }}/tunarr-concat-fix.tar
+
+      - name: Compress
+        run: gzip -1 "${{ runner.temp }}/tunarr-concat-fix.tar"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tunarr-concat-fix-image
+          path: ${{ runner.temp }}/tunarr-concat-fix.tar.gz
+          retention-days: 14
+          compression-level: 0
