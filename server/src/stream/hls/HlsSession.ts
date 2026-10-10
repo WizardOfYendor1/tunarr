@@ -9,6 +9,7 @@ import {
 } from '@/ffmpeg/builder/constants.js';
 import type { OnDemandChannelService } from '@/services/OnDemandChannelService.js';
 import { PlayerContext } from '@/stream/PlayerStreamContext.js';
+import type { StopOptions } from '@/stream/Session.js';
 import type { StreamProgramCalculator } from '@/stream/StreamProgramCalculator.js';
 import type { HlsSlowerSession } from '@/stream/hls/HlsSlowerSession.js';
 import type {
@@ -60,6 +61,12 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
   #currentSession: Maybe<FfmpegTranscodeSession>;
   #lastDelete: Dayjs = dayjs().subtract(1, 'year');
   #lastSubtitleDelete: Dayjs = dayjs().subtract(1, 'year');
+  // Every video segment numbered below this has been deleted. ffmpeg's
+  // stream.m3u8 still lists them, so trimmed playlists must start at or above
+  // the floor. Subtitles need no floor. Their muxer keeps a 20-entry window
+  // (HlsSubtitleOutputFormat), and that window is also the deletion boundary,
+  // so subs.m3u8 never lists a pruned .vtt.
+  #segmentFloor = 0;
   #isFirstTranscode = true;
   #lastDiscontinuitySequence: number | undefined;
   #currentSubtitleRendition: SubtitleRenditionInfo | undefined;
@@ -120,7 +127,7 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
       type: 'before_segment_number',
       segmentNumber: this.minSegmentRequested,
       segmentsToKeepBefore: 10,
-      // segmentFloor: this.#highestDeletedBelow,
+      segmentFloor: this.#segmentFloor,
     };
     return Result.attemptAsync(async () => {
       return await this.lock.runExclusive(async () => {
@@ -144,6 +151,13 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
               'Deleting old segments from stream (channel id = %s, number = %d)',
               this.channel.uuid,
               this.channel.number,
+            );
+
+            // A playlist of 20 or fewer entries skips the filter, so its
+            // sequence can fall below the floor.
+            this.#segmentFloor = Math.max(
+              this.#segmentFloor,
+              trimResult.sequence,
             );
             this.deleteOldSegmentFiles(trimResult.sequence, [
               '.ts',
@@ -241,18 +255,16 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
     // (e.g. via endSession). If the session is already stopped, its cleanup
     // has been handled and scheduling another timer would risk deleting a
     // replacement session that now occupies the same map key.
-    if (this.state !== 'stopped') {
+    if (!this.stoppingOrStopped) {
       this.scheduleCleanup();
     }
   }
 
-  protected async stopInternal(): Promise<void> {
+  protected async stopInternal(options: StopOptions): Promise<void> {
     try {
-      await this.stopStream();
+      await this.stopStream(options);
     } catch (e) {
       this.logger.error(e, 'Error while shutting down session');
-    } finally {
-      this.state = 'stopped';
     }
   }
 
@@ -339,6 +351,12 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
           this.error = transcodeSessionResult.error;
           this.emit('error', this.error);
         }
+      }
+
+      // A stop that landed during setup has already killed the previous
+      // transcode. Starting this one would leave an ffmpeg nothing kills.
+      if (this.state !== 'started') {
+        return;
       }
 
       transcodeSessionResult.forEach((transcodeSession) => {
@@ -570,9 +588,10 @@ export class HlsSession extends BaseHlsSession<HlsSessionOptions> {
     }
   }
 
-  protected async stopStream(): Promise<void> {
+  protected async stopStream(options: StopOptions): Promise<void> {
     if (this.#currentSession) {
       this.#currentSession.kill();
+      await this.waitForExit(this.#currentSession, options);
     }
 
     this.logger.debug(

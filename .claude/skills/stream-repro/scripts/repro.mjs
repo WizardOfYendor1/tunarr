@@ -16,6 +16,8 @@ const { values: opt } = parseArgs({
     layout: { type: 'string', default: 'basic' },
     clips: { type: 'string', default: '3' },
     'clip-seconds': { type: 'string', default: '60' },
+    'clip-durations': { type: 'string' },
+    'truncate-clip': { type: 'string' },
     'db-dir': { type: 'string' },
     channel: { type: 'string' },
     mode: { type: 'string', default: 'hls' },
@@ -24,7 +26,12 @@ const { values: opt } = parseArgs({
     ffmpeg: { type: 'string', default: 'ffmpeg' },
     ffprobe: { type: 'string', default: 'ffprobe' },
     'keep-server': { type: 'boolean', default: false },
+    rewind: { type: 'string' },
+    'rewind-polls': { type: 'string', default: '8' },
     reanalyze: { type: 'string' },
+    'flex-first': { type: 'string' },
+    'ffmpeg-setting': { type: 'string', multiple: true, default: [] },
+    resolution: { type: 'string' },
   },
 });
 
@@ -46,9 +53,17 @@ const out = path.resolve(
 fs.mkdirSync(out, { recursive: true });
 const dbDir = path.join(out, 'db');
 const seconds = Number(opt.seconds);
-if (opt.source === 'synthetic' && Number(opt['clip-seconds']) < 30) {
-  console.error('[repro] warning: clips under 30s get skipped; Tunarr jumps to the next program when <10s remain (SLACK in shared/src/util/constants.ts)');
-}
+// Per-clip lengths in seconds, e.g. "60,8,60" for a bumper between two programs.
+const clipDurations = opt['clip-durations']
+  ? opt['clip-durations'].split(',').map(Number)
+  : Array.from({ length: Number(opt.clips) }, () => Number(opt['clip-seconds']));
+if (clipDurations.some((d) => !(d > 0))) throw new Error('--clip-durations must be positive seconds, comma separated');
+const flexMs = opt['flex-first'] === undefined ? 0 : Number(opt['flex-first']);
+if (!(flexMs >= 0)) throw new Error('--flex-first takes milliseconds');
+if (flexMs > 0 && opt.source !== 'synthetic') throw new Error('--flex-first only works with --source synthetic');
+const resolutionMatch = opt.resolution === undefined ? null : /^(\d+)x(\d+)$/.exec(opt.resolution);
+if (opt.resolution !== undefined && !resolutionMatch) throw new Error('--resolution takes WIDTHxHEIGHT, such as 1280x720');
+const resolution = resolutionMatch && { widthPx: Number(resolutionMatch[1]), heightPx: Number(resolutionMatch[2]) };
 const log = (...a) => console.error('[repro]', ...a);
 
 // ---------- helpers ----------
@@ -74,6 +89,15 @@ async function api(base, method, route, body) {
   const text = await res.text();
   if (!res.ok) throw new Error(`${method} ${route} -> ${res.status}: ${text.slice(0, 300)}`);
   return text ? JSON.parse(text) : null;
+}
+
+// /api/channels/:id only takes a uuid, so a channel number is resolved from the list.
+async function findChannel(base, numberOrId) {
+  if (!/^\d+$/.test(numberOrId)) return api(base, 'GET', `/api/channels/${numberOrId}`);
+  const channels = await api(base, 'GET', '/api/channels');
+  const ch = channels.find((c) => c.number === Number(numberOrId));
+  if (!ch) throw new Error(`no channel with number ${numberOrId}`);
+  return ch;
 }
 
 async function until(label, fn, timeoutMs, everyMs = 1000) {
@@ -134,9 +158,9 @@ function makeClips(dir) {
   const layout = LAYOUTS[opt.layout];
   if (!layout) throw new Error(`unknown --layout ${opt.layout}; use ${Object.keys(LAYOUTS).join(', ')}`);
   fs.mkdirSync(dir, { recursive: true });
-  const dur = Number(opt['clip-seconds']);
   const clips = [];
-  for (let i = 0; i < Number(opt.clips); i++) {
+  for (let i = 0; i < clipDurations.length; i++) {
+    const dur = clipDurations[i];
     const l = layout(i);
     const file = path.join(dir, `clip${String(i + 1).padStart(2, '0')}.mkv`);
     const args = ['-y', '-v', 'error', '-f', 'lavfi', '-i', `testsrc2=size=${l.size}:rate=${l.rate}`];
@@ -167,6 +191,18 @@ function makeClips(dir) {
     clips.push({ file: path.basename(file), layout: l });
   }
   return clips;
+}
+
+// Shortens clip I (1-based) to S seconds after the scan, so the database keeps
+// the longer duration. This mimics media that ends before its scheduled time.
+function truncateClip(dir, spec) {
+  const [i, s] = spec.split(':').map(Number);
+  if (!(i >= 1 && i <= clipDurations.length && s > 0)) throw new Error('--truncate-clip takes I:S, a 1-based clip index and seconds');
+  const file = path.join(dir, `clip${String(i).padStart(2, '0')}.mkv`);
+  const tmp = `${file}.tmp.mkv`;
+  execFileSync(opt.ffmpeg, ['-y', '-v', 'error', '-i', file, '-t', String(s), '-map', '0', '-c', 'copy', tmp]);
+  fs.renameSync(tmp, file);
+  log(`truncated clip ${i} to ${s}s; the database still says ${clipDurations[i - 1]}s`);
 }
 
 // ---------- server ----------
@@ -250,6 +286,7 @@ async function buildSyntheticChannel(base, clipsDir) {
 
   const configs = await api(base, 'GET', '/api/transcode_configs');
   const tc = configs.find((c) => c.isDefault) ?? configs[0];
+  await applyResolution(base, tc.id);
   const startTime = Date.now();
   const channel = await api(base, 'POST', '/api/channels', {
     type: 'new',
@@ -273,13 +310,51 @@ async function buildSyntheticChannel(base, clipsDir) {
   await api(base, 'POST', `/api/channels/${channel.id}/programming`, {
     type: 'manual',
     append: false,
-    lineup: programs.map((p) => ({ type: 'content', id: p.id, duration: p.duration })),
+    lineup: [
+      ...(flexMs ? [{ type: 'flex', duration: flexMs }] : []),
+      ...programs.map((p) => ({ type: 'content', id: p.id, duration: p.duration })),
+    ],
   });
   return {
     channelId: channel.id,
     startTime,
-    lineup: programs.map((p) => ({ title: p.program?.title, durationMs: p.duration })),
+    lineup: [
+      ...(flexMs ? [{ title: '(flex)', durationMs: flexMs }] : []),
+      ...programs.map((p) => ({ title: p.program?.title, durationMs: p.duration })),
+    ],
   };
+}
+
+async function applyResolution(base, transcodeConfigId) {
+  if (!resolution) return;
+  const tc = await api(base, 'GET', `/api/transcode_configs/${transcodeConfigId}`);
+  await api(base, 'PUT', `/api/transcode_configs/${transcodeConfigId}`, { ...tc, resolution });
+}
+
+// Values parse as JSON when they can (true, 3, "x"), and as plain strings otherwise.
+async function applyFfmpegSettings(base) {
+  if (opt['ffmpeg-setting'].length === 0) return undefined;
+  const overrides = {};
+  for (const kv of opt['ffmpeg-setting']) {
+    const eq = kv.indexOf('=');
+    if (eq < 1) throw new Error(`--ffmpeg-setting needs key=value, got ${kv}`);
+    const raw = kv.slice(eq + 1);
+    let value;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      value = raw;
+    }
+    overrides[kv.slice(0, eq)] = value;
+  }
+  const current = await api(base, 'GET', '/api/ffmpeg-settings');
+  await api(base, 'PUT', '/api/ffmpeg-settings', { ...current, ...overrides });
+
+  // The schema strips unknown keys, so a misspelled key would otherwise pass silently.
+  const saved = await api(base, 'GET', '/api/ffmpeg-settings');
+  const ignored = Object.keys(overrides).filter((k) => JSON.stringify(saved[k]) !== JSON.stringify(overrides[k]));
+  if (ignored.length) throw new Error(`ffmpeg settings not applied: ${ignored.join(', ')}`);
+  return overrides;
 }
 
 // ---------- capture ----------
@@ -301,6 +376,76 @@ async function captureTs(base, channelId) {
   return { t0, pieces: [{ file, discontinuityBefore: false }] };
 }
 
+function hlsListUrl(base, channelId) {
+  const sessionType = opt.mode === 'hls_slower' ? 'hls_slower' : opt.mode === 'hls_direct_v2' ? 'hls_direct_v2' : 'hls';
+  return `${base}/stream/channels/${channelId}/${sessionType}/stream.m3u8`;
+}
+
+const SEGMENT_NUMBER = /(\d+)(\.(?:ts|mp4|m4s))$/;
+
+// Rewrites a segment URL to another segment number, keeping the zero padding.
+function segmentUrlAt(url, number) {
+  const u = new URL(url);
+  u.pathname = u.pathname.replace(SEGMENT_NUMBER, (_, digits, ext) => String(number).padStart(digits.length, '0') + ext);
+  return u.toString();
+}
+
+function segmentNumber(url) {
+  const m = new URL(url).pathname.match(SEGMENT_NUMBER);
+  return m ? Number(m[1]) : undefined;
+}
+
+// Acts as the capture client jumping back N segments, then playing on the way
+// a player does. It polls the playlist and fetches each newly listed segment
+// once, in order. A listed segment that 404s means the playlist points at a
+// file that pruning deleted.
+async function rewindHls(base, channelId, seen) {
+  const n = Number(opt.rewind);
+  const polls = Number(opt['rewind-polls']);
+  const listUrl = hlsListUrl(base, channelId);
+  const urls = [...seen].map((l) => new URL(l, listUrl).toString()).filter((u) => segmentNumber(u) !== undefined);
+  if (urls.length === 0) throw new Error('--rewind: the capture saw no numbered segments');
+  const last = urls.reduce((a, b) => (segmentNumber(b) > segmentNumber(a) ? b : a));
+  const from = segmentNumber(last);
+  const target = Math.max(0, from - n);
+  const targetUrl = segmentUrlAt(last, target);
+  const targetStatus = (await fetch(targetUrl)).status;
+
+  const fetched = new Map();
+  const results = [];
+  for (let i = 0; i < polls; i++) {
+    await sleep(2000);
+    const res = await fetch(listUrl);
+    if (!res.ok) {
+      results.push({ poll: i, playlistStatus: res.status });
+      continue;
+    }
+    const text = await res.text();
+    const listed = text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#'))
+      .map((l) => new URL(l, listUrl).toString());
+    const missing = [];
+    for (const url of listed) {
+      if (!fetched.has(url)) fetched.set(url, (await fetch(url)).status);
+      if (fetched.get(url) === 404) missing.push(path.basename(new URL(url).pathname));
+    }
+    const numbers = listed.map(segmentNumber).filter((x) => x !== undefined);
+    results.push({
+      poll: i,
+      mediaSequence: Number(text.match(/#EXT-X-MEDIA-SEQUENCE:(\d+)/)?.[1]),
+      firstListed: numbers.length ? Math.min(...numbers) : null,
+      lastListed: numbers.length ? Math.max(...numbers) : null,
+      listed: listed.length,
+      missing,
+    });
+  }
+
+  const segment404s = [...fetched.values()].filter((s) => s === 404).length;
+  return { n, from, target, targetStatus, segment404s, polls: results };
+}
+
 async function captureHls(base, channelId) {
   const t0 = Date.now();
   await until(
@@ -309,8 +454,7 @@ async function captureHls(base, channelId) {
     90_000,
     1500,
   );
-  const sessionType = opt.mode === 'hls_slower' ? 'hls_slower' : opt.mode === 'hls_direct_v2' ? 'hls_direct_v2' : 'hls';
-  const listUrl = `${base}/stream/channels/${channelId}/${sessionType}/stream.m3u8`;
+  const listUrl = hlsListUrl(base, channelId);
   const segDir = path.join(out, 'segments');
   fs.mkdirSync(segDir, { recursive: true });
   const seen = new Set();
@@ -339,7 +483,7 @@ async function captureHls(base, channelId) {
             if (seg.ok) {
               const file = path.join(segDir, `${String(pieces.length).padStart(4, '0')}-${path.basename(new URL(url).pathname)}`);
               fs.writeFileSync(file, Buffer.from(await seg.arrayBuffer()));
-              pieces.push({ file, discontinuityBefore: disc, extinf: dur });
+              pieces.push({ file, discontinuityBefore: disc, extinf: dur, fetchedAtMs: Date.now() - t0 });
               captured += dur;
             }
           }
@@ -349,7 +493,7 @@ async function captureHls(base, channelId) {
     }
     await sleep(1000);
   }
-  return { t0, pieces, sessionRestarts };
+  return { t0, pieces, sessionRestarts, seen };
 }
 
 // ---------- analysis ----------
@@ -483,14 +627,18 @@ try {
     report.clips = makeClips(clipsDir);
     log('starting server');
     server = await startServer();
+    report.ffmpegSettings = await applyFfmpegSettings(server.base);
     log('building channel', server.base);
     channel = await buildSyntheticChannel(server.base, clipsDir);
+    if (opt['truncate-clip']) truncateClip(clipsDir, opt['truncate-clip']);
   } else if (opt.source === 'copy') {
     if (!opt.channel) throw new Error('--source copy needs --channel <number|uuid>');
     log('copying database');
     prepareDbCopy();
     server = await startServer();
-    const ch = await api(server.base, 'GET', `/api/channels/${opt.channel}`);
+    report.ffmpegSettings = await applyFfmpegSettings(server.base);
+    const ch = await findChannel(server.base, opt.channel);
+    await applyResolution(server.base, ch.transcodeConfigId);
     channel = { channelId: ch.id, startTime: ch.startTime, lineup: null };
   } else {
     throw new Error(`unknown --source ${opt.source}`);
@@ -508,6 +656,18 @@ try {
   log('analyzing');
   Object.assign(report, analyze(cap.pieces));
   for (const at of report.sessionRestarts) report.findings.push({ kind: 'hls_session_restarted', at });
+
+  if (opt.rewind !== undefined) {
+    if (opt.mode === 'mpegts') throw new Error('--rewind needs an HLS mode');
+    log(`rewinding ${opt.rewind} segments`);
+    report.rewind = await rewindHls(server.base, channel.channelId, cap.seen);
+    if (report.rewind.targetStatus === 404) {
+      report.findings.push({ kind: 'rewind_target_missing', segment: report.rewind.target });
+    }
+    for (const p of report.rewind.polls) {
+      if (p.missing?.length) report.findings.push({ kind: 'playlist_lists_missing_segment', poll: p.poll, files: p.missing });
+    }
+  }
   report.ffmpeg = ffmpegCommands();
 } catch (e) {
   report.error = String(e.stack ?? e);

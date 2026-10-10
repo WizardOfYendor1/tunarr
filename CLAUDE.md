@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Follow the contribution policy for AI agents in @AGENTS.md.
+
 ## Project Overview
 
 Tunarr is a live TV channel creation platform that allows users to create custom TV channels using media from local files or remote media servers such as Plex, Jellyfin, or Emby servers. It's a TypeScript monorepo using pnpm workspaces and Turbo for task running.
@@ -37,6 +39,12 @@ This is a monorepo with four main packages:
 - The `main` branch creates "stable" releases. It receives fixes, chores, build/CI changes, docs, refactors, and small to medium features, including those with database migrations.
 - The `dev` branch creates prereleases. It is reserved for large features that need many prerelease iterations before they reach stable, such as infinite schedules or remote streaming sources.
 
+### Plans
+
+- Write all plans, investigations, and audits to `plans/` at the repo root. Never use `.claude/plans/`.
+- Name files `<topic>.md`, adding a date suffix (`-YYYY-MM-DD`) for point-in-time reports.
+- `.claude/settings.json` sets `plansDirectory` to `plans`, so plan-mode plans land there too.
+
 ### PR Review Labels
 
 The maintainer cannot approve their own PRs on GitHub, so review agents record their verdict with labels.
@@ -54,6 +62,9 @@ The maintainer cannot approve their own PRs on GitHub, so review agents record t
 - Commands: `gh pr edit <n> --add-label approved --remove-label "changes requested"` and the reverse.
 
 ### Common Commands
+
+- Build and typecheck through Turbo (`pnpm turbo build`, `pnpm turbo typecheck`). Turbo rebuilds the packages a package depends on first.
+- To check a single package directly, run its own script (`pnpm typecheck` / `pnpm build` inside the package). These use `tsgo -p tsconfig.build.json`. Never run `npx tsc` directly, because it uses the wrong compiler and pulls in test files the build excludes.
 
 ```bash
 # Install dependencies
@@ -194,6 +205,16 @@ The web app uses a generated API client (`generated/`) created from the server's
 - Test files use `.test.ts` extension
 - Run tests with `pnpm turbo test` or `pnpm test:watch` for watch mode
 - Server tests often use `@faker-js/faker` for test data generation
+
+### E2E route sweep (`e2e/`)
+
+- Playwright suite that visits every web route against a seeded server. Local only; CI does not run it yet.
+- Run with `cd e2e && pnpm e2e`. First time only: `pnpm e2e:install-browsers`. Needs `ffmpeg` on the PATH and the Meilisearch binary (`cd server && pnpm install-meilisearch`).
+- Uses its own ports (server 18000, search 17700, web 15173), so it can run beside `pnpm turbo dev`.
+- The fixture is rebuilt on every run: generated test clips, three local media sources, three channels, a custom show, a filler list, and a smart collection (`e2e/fixture/seed.ts`).
+- A route fails on uncaught exceptions, `console.error` output (including React warnings), 5xx API responses, or the error page.
+- New routes must be added to `e2e/tests/routes.ts`; a coverage test compares it against `routeTree.gen.ts`.
+- Pre-existing warnings are listed per route in `e2e/tests/knownIssues.ts`. Remove an entry when its cause is fixed.
 
 ## Code Style
 

@@ -24,13 +24,30 @@ node .claude/skills/stream-repro/scripts/repro.mjs [options]
 | `--source synthetic\|copy` | `synthetic` | Generate clips, or replay a real channel from a copied database |
 | `--layout basic\|multi-audio\|dup-lang\|subs\|mixed` | `basic` | Synthetic clip track layout (see below) |
 | `--clips N`, `--clip-seconds S` | `3`, `60` | Number and length of synthetic clips; each clip is one program |
+| `--clip-durations LIST` | | Per-clip lengths in seconds, such as `60,8,60` for a bumper between two programs. Overrides `--clips` and `--clip-seconds` |
+| `--truncate-clip I:S` | | Shorten clip I (1-based) to S seconds after the scan. The database keeps the longer duration, which mimics media that ends before its scheduled time |
 | `--db-dir DIR` | | `copy` only: Tunarr database directory to copy (the dev server's is `TUNARR_DATABASE_PATH` in `server/.env.development`) |
 | `--channel ID` | | `copy` only: channel number or uuid to stream |
 | `--mode hls\|hls_slower\|hls_direct_v2\|mpegts` | `hls` | Stream mode to request |
 | `--seconds S` | `60` | How much stream to capture |
 | `--out DIR` | temp dir | Where clips, database, capture, and `report.json` go |
 | `--keep-server` | off | Leave the server running afterward for manual poking |
+| `--rewind N` | | HLS only. After the capture, jump back N segments, then play on (see below) |
+| `--rewind-polls P` | `8` | Playlist polls after the rewind, 2 s apart |
 | `--reanalyze DIR` | | Re-score an existing capture without booting a server |
+| `--flex-first MS` | | `synthetic` only. Put an offline (flex) gap of MS milliseconds before the clips |
+| `--ffmpeg-setting KEY=VALUE` | | Override one field of the server's ffmpeg settings before streaming. Repeatable. Values parse as JSON when they can, so `true` and `3` are not strings |
+| `--resolution WxH` | | Set the output resolution of the channel's transcode config, such as `1280x720` |
+
+Use `--flex-first` to test the offline placeholder stream, which plays during flex gaps and is built
+separately from program streams (`createOfflineSession` in `server/src/ffmpeg/FfmpegStreamFactory.ts`).
+It runs first in the lineup, so the capture starts inside it. Pair it with `--ffmpeg-setting` to check
+that a setting reaches that path, for example `--flex-first 45000 --ffmpeg-setting
+scalingAlgorithm=lanczos --resolution 1280x720`. The keys are the fields of `FfmpegSettingsSchema` in
+`types/src/schemas/settingsSchemas.ts`. The run fails if the server rejects a value or if a key does not
+stick (a misspelled key gets dropped). `report.ffmpegSettings` records what was overridden. The offline
+image is 1920x1080 and the default output is 1080p, so no scale filter runs unless `--resolution` sets
+another size. Without it, `scalingAlgorithm` has nothing to show.
 
 Pick the layout that matches the report. `dup-lang` has two `eng` audio tracks, one titled
 Commentary, which is how a real library ends up with duplicate-language audio. `mixed` alternates resolution, frame rate, sample rate, channel
@@ -38,9 +55,13 @@ count, subtitles, and audio-track count between programs, so it exercises transi
 capture long enough to cross at least two program boundaries: `--seconds` should exceed
 `2 × --clip-seconds`.
 
-Keep clips at 30 s or longer. Tunarr skips to the next program when a stream request lands with less
-than 10 s left in the current one (`SLACK` in `shared/src/util/constants.ts`). Transcodes run faster
-than real time, so short clips get skipped and the run tests a different transition than you intended.
+Short clips are fine. Tunarr skips to the next program only when a stream request lands with less than
+1 s left in the current one, and it never skips a program of 2 s or less (`STREAM_TAIL_SLACK_MS` in
+`server/src/stream/StreamProgramCalculator.ts`).
+
+To check that each program airs on schedule, compare the `About to play lineup item` debug entries in
+`tunarr.log` with the lineup. Each entry's `programBeginMs`, minus `channel.startTime`, should equal the
+program's offset in the lineup.
 
 A run takes one to three minutes. Most of that is server boot and real-time streaming.
 
@@ -65,6 +86,7 @@ A run takes one to three minutes. Most of that is server boot and real-time stre
 - `findings`: one entry per detected anomaly, described below.
 - `ffmpeg.commands`: every ffmpeg argv the server started, in order. There is roughly one per program.
 - `sessionRestarts`: times the HLS session died and the capture restarted it.
+- `capturePieces[].fetchedAtMs`: when the capture fetched each HLS segment, from capture start. A long gap between neighbors means the playlist stopped growing.
 
 | Finding | What it means |
 |---|---|
@@ -73,6 +95,14 @@ A run takes one to three minutes. Most of that is server boot and real-time stre
 | `pts_gap` | Timestamps jump forward by more than 3× the typical frame or packet spacing inside one continuous run. |
 | `pts_overlap` | Many packets share nearly the same timestamp, which is what a backward jump looks like after sorting. `count` says how many. |
 | `hls_session_restarted` | The HLS session died mid-capture. The reason is in `tunarr.log` near that time. |
+| `rewind_target_missing` | The `--rewind` target was already pruned. Expected when N reaches past the retained window. |
+| `playlist_lists_missing_segment` | A playlist after the rewind listed segments that 404. The playlist points at files pruning deleted. |
+
+`--rewind` tests playlist trimming and pruning. Pruning runs at most every 30 s, so capture long enough
+for it to fire, such as `--seconds 120`. The rewind client uses the capture client's IP, so the server
+treats it as the same viewer. It fetches each newly listed segment once, in order, as a player would.
+`report.rewind` records the target, its status, the total segment 404s, and for each poll the listed
+range and the missing files.
 
 Runs are split at discontinuities, so the expected timestamp reset between HLS programs is not flagged.
 MPEG-TS concat captures form a single run. To place a finding in a program, compare its PTS with the lineup

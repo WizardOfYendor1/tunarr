@@ -81,7 +81,10 @@ import {
 import { loggingDef } from '../util/logging/loggingDef.ts';
 import { EventService } from './EventService.ts';
 import { OnDemandChannelService } from './OnDemandChannelService.ts';
-import { XmlTvWriter } from './XmlTvWriter.ts';
+import {
+  type MaterializedChannelPrograms,
+  XmlTvWriter,
+} from './XmlTvWriter.ts';
 import { findMidRollAnchorIndex, isSameProgramSegment } from './tvGuideUtil.ts';
 
 export type ChannelAndPrograms = ChannelOrm & {
@@ -150,6 +153,8 @@ export class TVGuideService {
   private eventService: EventService;
   private programConverter: ProgramConverter;
   private cachedGuide: Record<ChannelId, ChannelPrograms>;
+  private runningXmlTvWrite?: Promise<void>;
+  private queuedXmlTvWrite?: Promise<void>;
 
   private lastUpdateTime: Record<string, number>;
   private lastEndTime: Record<string, number>;
@@ -1101,27 +1106,68 @@ export class TVGuideService {
     }
   }
 
-  private async writeXmlTv() {
+  /**
+   * Writes XMLTV from the guide cache, one write at a time.
+   *
+   * Each write loads every guide program, so overlapping writes multiply peak
+   * memory. A call made while a write runs joins a single follow-up write.
+   * The follow-up reads the cache when it starts, so it holds every change made
+   * before it started. A call made after that queues a new follow-up write.
+   */
+  private writeXmlTv(): Promise<void> {
+    if (this.queuedXmlTvWrite) {
+      return this.queuedXmlTvWrite;
+    }
+
+    const running = this.runningXmlTvWrite;
+    if (!running) {
+      return this.startXmlTvWrite();
+    }
+
+    // The running write's callers receive its error. The follow-up runs anyway,
+    // because its callers' changes are not on disk yet.
+    const queued = running
+      .catch(() => {})
+      .then(() => {
+        this.queuedXmlTvWrite = undefined;
+        return this.startXmlTvWrite();
+      });
+    this.queuedXmlTvWrite = queued;
+    return queued;
+  }
+
+  private startXmlTvWrite(): Promise<void> {
+    const write = this.writeXmlTvInternal().finally(() => {
+      this.runningXmlTvWrite = undefined;
+    });
+    this.runningXmlTvWrite = write;
+    return write;
+  }
+
+  private async writeXmlTvInternal() {
     // Every channel's programs are fetched in one pass rather than one query
     // per channel. The results were being merged into a single flat map
     // regardless, so the per-channel split bought nothing and cost plenty:
     // deduplication was scoped to a channel, so a program scheduled on several
     // channels had its whole relation graph fetched and rebuilt once per
-    // channel. getProgramsByIds dedupes and chunks internally.
+    // channel. getGuideProgramsByIds dedupes and chunks internally.
+    const guides = Object.values(this.cachedGuide);
     const allProgramsById = await this.getAllCurrentGuidePrograms(
-      Object.values(this.cachedGuide).flatMap(({ programs }) => programs),
+      guides.flatMap(({ programs }) => programs),
     );
 
-    const materializedGuide = Object.values(this.cachedGuide).map(
-      ({ channel, programs }) => {
-        return {
-          channel,
-          programs: programs.map((program) =>
-            this.materializeGuideItem(channel, program, allProgramsById),
-          ),
-        };
-      },
-    );
+    // Yield per channel: every channel's guide items together are tens of
+    // milliseconds of synchronous work on a large guide.
+    const materializedGuide: MaterializedChannelPrograms[] = [];
+    for (const { channel, programs } of guides) {
+      await throttle();
+      materializedGuide.push({
+        channel,
+        programs: programs.map((program) =>
+          this.materializeGuideItem(channel, program, allProgramsById),
+        ),
+      });
+    }
 
     await this.xmltv.write(materializedGuide);
 
@@ -1137,7 +1183,11 @@ export class TVGuideService {
     });
   }
 
-  private async getChannelGuides(
+  /**
+   * Builds guides for the given channels, or for every channel when no filter
+   * is passed. Programs carry the lineup relation set only.
+   */
+  async getChannelGuides(
     dateRange: OpenDateTimeRange,
     channelIdFilter?: string[],
   ) {
@@ -1184,7 +1234,10 @@ export class TVGuideService {
       ),
     );
 
-    const dbPrograms = await this.programDB.getProgramsByIds(programIds);
+    // Guide responses carry only what the guide grid shows. Credits, genres
+    // and artwork are left out because a guide spans every program in the
+    // window, and clients fetch a program's details by ID when they need them.
+    const dbPrograms = await this.programDB.getLineupProgramsByIds(programIds);
 
     const materializedPrograms =
       await this.materializeProgramsCommand.execute(dbPrograms);
@@ -1335,8 +1388,12 @@ export class TVGuideService {
       (item) => item.id,
     );
     return groupByUniq(
-      await this.programDB.getProgramsByIds(
+      await this.programDB.getGuideProgramsByIds(
         contentItems.map((item) => item.id),
+        {
+          includeCreditArtwork:
+            this.settingsDB.featureFlags().xmltvCreditImagesEnabled,
+        },
       ),
       (prg) => prg.uuid,
     );
