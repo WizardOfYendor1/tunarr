@@ -23,6 +23,7 @@ import type {
   CondensedChannelProgramming,
   ContentProgram,
   SaveableChannel,
+  UpdateChannelRequest,
 } from '@tunarr/types';
 import type { UpdateChannelProgrammingRequest } from '@tunarr/types/api';
 import type { ContentProgramType } from '@tunarr/types/schemas';
@@ -100,7 +101,7 @@ export interface IChannelDB {
 
   updateChannel(
     id: string,
-    updateReq: SaveableChannel,
+    updateReq: UpdateChannelRequest,
   ): Promise<
     ChannelAndLineup<MarkRequired<ChannelOrmWithRelations, 'fillerShows'>>
   >;
@@ -209,8 +210,8 @@ export interface IChannelDB {
   findChannelsForProgramId(programId: string): Promise<ChannelOrm[]>;
 }
 export type UpdateChannelLineupRequest = MarkOptional<
-  MarkNullable<Omit<Lineup, 'lastUpdated'>, 'schedule'>,
-  'version' | 'onDemandConfig' | 'items' | 'startTimeOffsets'
+  MarkNullable<Omit<Lineup, 'lastUpdated'>, 'schedule' | 'scheduleSeed'>,
+  'version' | 'onDemandConfig' | 'items' | 'startTimeOffsets' | 'scheduleSeed'
 >;
 
 export type PageParams = {

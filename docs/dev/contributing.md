@@ -40,6 +40,26 @@ This starts:
 - **Backend server** on `http://localhost:8000`
 - **Frontend dev server** on `http://localhost:5173/web`
 
+## Dev Containers
+
+The repository ships two [dev container](https://containers.dev/) configurations in `.devcontainer/`. Both include Node 22, pnpm, ffmpeg 7.1.1, and the Meilisearch binary, and both build `@tunarr/types` and `@tunarr/shared` on creation.
+
+| Configuration | Use it for | Extra setup |
+|---------------|------------|-------------|
+| **Tunarr: Testing** | Running unit tests and the e2e route sweep | Playwright Chromium and its system libraries |
+| **Tunarr: PR Review** | Checking out and reviewing a pull request | None, so it starts faster |
+
+VS Code asks which configuration to use when you run **Dev Containers: Reopen in Container**.
+
+### Reviewing a pull request in a container
+
+Use either route. Both clone the repository into an isolated Docker volume, so your local checkout stays untouched.
+
+- **Dev Containers extension:** run **Dev Containers: Clone Repository in Container Volume**, paste the pull request URL, and pick **Tunarr: PR Review**.
+- **GitHub Pull Requests extension:** right-click the pull request in the GitHub view and choose **Checkout Pull Request in Dev Container**.
+
+The container builds from the pull request's own `.devcontainer/`, so a PR that changes the container config is reviewed in the changed container.
+
 ## Repository Structure
 
 Tunarr is a monorepo with four main packages:
@@ -324,6 +344,68 @@ pnpm test:watch
 cd server && pnpm test path/to/file.test.ts
 ```
 
+## Testing a Build in Docker
+
+`pnpm docker-test` builds your working tree into the production Docker image and runs it. Use it to test a change on real hardware, such as a GPU transcoding pipeline, on your own machine or on a remote server.
+
+It layers three compose files from `docker/test/`:
+
+| Layer | File | Committed |
+|-------|------|-----------|
+| Base | `compose.yaml` | Yes |
+| Hardware pipeline | `pipelines/<name>.compose.yaml` | Yes |
+| Your Docker host | `local.compose.yaml` (optional) | No |
+
+Settings that differ between machines live in `docker/test/.env`, which is also ignored by git.
+
+### Docker Host Requirements
+
+- Docker Engine 23 or later
+- A user that can run `docker` without `sudo`
+- For the `vaapi` and `qsv` pipelines: a working GPU driver, so that `/dev/dri` exists
+- For the `nvidia` pipeline: the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+
+### Setup
+
+1. Copy the templates:
+
+    ```bash
+    cp docker/test/.env.example docker/test/.env
+    cp docker/test/local.compose.example.yaml docker/test/local.compose.yaml  # optional
+    ```
+
+2. Edit `docker/test/.env`. Set `TUNARR_TEST_DATA_DIR` and choose a `TUNARR_TEST_PIPELINE` (`none`, `vaapi`, `qsv`, or `nvidia`).
+3. Add your media mounts to `docker/test/local.compose.yaml`, if you need any.
+4. To run on a remote server, create a Docker context that reaches it over SSH and set `TUNARR_TEST_DOCKER_CONTEXT` to its name:
+
+    ```bash
+    docker context create my-server --docker "host=ssh://user@my-server"
+    ```
+
+!!! warning
+    Every path in `.env` and `local.compose.yaml` is a path on the Docker host. With a remote context, that is the server, not your machine. Docker creates a missing host path as an empty directory instead of reporting an error.
+
+!!! warning
+    Point `TUNARR_TEST_DATA_DIR` at a directory set aside for testing, or at a copy of your data. A test build may run database migrations.
+
+### Commands
+
+```bash
+pnpm docker-test              # Build the working tree and start it
+pnpm docker-test logs -f      # Follow the logs
+pnpm docker-test config       # Print the merged compose file without running anything
+pnpm docker-test down         # Stop and remove the container
+pnpm docker-test repro        # Run the stream-repro script in a throwaway container
+```
+
+`pnpm docker-test repro` builds the same image and runs `.claude/skills/stream-repro/scripts/repro.mjs` inside a throwaway container with the pipeline's GPU, then copies its report back to a local temp directory. Options after `repro` go to the script; see `.claude/skills/stream-repro/SKILL.md`.
+
+Any other arguments are passed to `docker compose`. The build includes uncommitted changes. The server listens on port `8001` by default, so the web UI is at `http://<docker-host>:8001/web`.
+
+### Adding a Pipeline
+
+Add `docker/test/pipelines/<name>.compose.yaml` containing only the settings that pipeline needs. `TUNARR_TEST_PIPELINE=<name>` then selects it.
+
 ## Architecture Overview
 
 ### Server
@@ -421,11 +503,19 @@ Maintainers are the people listed in [`.github/CODEOWNERS`](https://github.com/c
 
 The bot doesn't check PRs opened before October 10, 2026. Maintainers may still apply these rules to them by hand.
 
+The bot re-checks a PR whenever it's pushed, edited, labeled, or reopened. To re-check it without changing anything, comment `/recheck` on the PR. Only the PR author and people with write access can do this. Maintainers can also run the PR Policy workflow from the Actions tab with a PR number.
+
+### Open PR limit
+
+Each outside contributor may have up to 5 PRs open for review at once. When you open a sixth, the bot converts it to a draft and says why. Mark it ready for review once one of your other PRs is merged or closed. Drafts don't count toward the limit, and PRs opened before the policy took effect do.
+
 ### During review
 
 - Address each comment with a change scoped to that comment. Don't regenerate or rewrite unrelated code, because that forces the reviewer to start over.
 - If you don't know why your code does something, say so. Then find out before you change it.
 - A PR whose author can't answer questions about their own code will be closed.
+- A PR that doesn't follow this policy or the [AI use](#ai-use) rules is labeled `needs policy fix`. The bot applies it when the "AI use" section is missing or contradicted by the commits, and removes it once that's fixed. A maintainer applies it by hand for anything else and comments with what to change.
+- A PR labeled `changes requested` or `needs policy fix` with no activity for 30 days gets a warning comment. If nothing happens in the next 7 days, it is closed. Any push or comment resets the clock. Draft PRs are exempt.
 
 ## AI Use
 

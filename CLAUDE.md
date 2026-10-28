@@ -41,7 +41,8 @@ This is a monorepo with four main packages:
 
 ### Plans
 
-- Write all plans, investigations, and audits to `plans/` at the repo root. Never use `.claude/plans/`.
+- Write all plans, designs, and audits to `plans/` at the repo root. Never use `.claude/plans/`.
+- Write issue investigations to `plans/investigations/`, named `issue-<n>-<slug>-YYYY-MM-DD.md`. These report whether a bug is real and why. A design that follows from one goes in `plans/`.
 - Name files `<topic>.md`, adding a date suffix (`-YYYY-MM-DD`) for point-in-time reports.
 - `.claude/settings.json` sets `plansDirectory` to `plans`, so plan-mode plans land there too.
 
@@ -64,7 +65,8 @@ The maintainer cannot approve their own PRs on GitHub, so review agents record t
 ### Common Commands
 
 - Build and typecheck through Turbo (`pnpm turbo build`, `pnpm turbo typecheck`). Turbo rebuilds the packages a package depends on first.
-- To check a single package directly, run its own script (`pnpm typecheck` / `pnpm build` inside the package). These use `tsgo -p tsconfig.build.json`. Never run `npx tsc` directly, because it uses the wrong compiler and pulls in test files the build excludes.
+- To check a single package directly, run its own script (`pnpm typecheck` / `pnpm build` inside the package). These use `tsc -p tsconfig.build.json`. Never run a bare `tsc` without `-p tsconfig.build.json`, because the default `tsconfig.json` pulls in test files the build excludes.
+- Neither `pnpm typecheck` nor `tsconfig.json` covers `server/tests/`. Only `tsconfig.test.json` does, so typecheck changes there with `pnpm exec tsc --noEmit -p tsconfig.test.json` inside `server`.
 
 ```bash
 # Install dependencies
@@ -90,6 +92,9 @@ pnpm lint-changed
 
 # Run the typechecker
 pnpm turbo typecheck
+
+# Build the working tree into a Docker image and run it (see docker/test/)
+pnpm docker-test
 
 # Server-specific commands
 cd server
@@ -201,6 +206,7 @@ The web app uses a generated API client (`generated/`) created from the server's
 
 ## Testing
 
+- **Every code change ships with unit tests.** A bug fix adds a test that fails without the fix. If the logic sits in a private method or behind heavy dependencies, move it into a small exported function and test that.
 - **Vitest** is used for testing across all packages
 - Test files use `.test.ts` extension
 - Run tests with `pnpm turbo test` or `pnpm test:watch` for watch mode
@@ -237,6 +243,11 @@ The web app uses a generated API client (`generated/`) created from the server's
 - Database interfaces are in `db/interfaces/` - implement these for new DB access classes
 - Use dependency injection to get database instances
 - All database schema changes should have migrations generated via `pnpm drizzle-kit generate`
+
+### When Working with Slot Schedules:
+
+- Time slots and random slots are being deprecated in favor of infinite schedules (`architecture/infinite-schedules/README.md`, "Deprecation plan").
+- A PR that adds or changes classic slot-scheduler behavior must add a row to `architecture/infinite-schedules/parity-checklist.md`.
 
 ### When Working with Streaming:
 

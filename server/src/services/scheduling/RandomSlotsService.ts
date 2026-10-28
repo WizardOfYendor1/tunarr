@@ -49,8 +49,6 @@ import {
 } from './slotSchedulerUtil.js';
 import { LoggerFactory } from '../../util/logging/LoggerFactory.ts';
 
-export const random = new Random(MersenneTwister19937.autoSeed());
-
 dayjs.extend(duration);
 dayjs.extend(relativeTime);
 dayjs.extend(utc);
@@ -467,7 +465,6 @@ export class RandomSlotScheduler {
             throw new Error(
               `Cannot schedule slot of type ${slot.type} with dynamic duration`,
             );
-          case 'movie':
           case 'show':
           case 'custom-show':
           case 'filler':
@@ -693,7 +690,7 @@ export class RandomSlotScheduler {
 
       n += slot.weight;
 
-      if (random.bool(slot.weight, n)) {
+      if (context.random.bool(slot.weight, n)) {
         selected = { slot, index: i };
       }
     }

@@ -1,7 +1,6 @@
 import { z } from 'zod/v4';
 import { FeatureFlagsSchema } from '../FeatureFlags.js';
 import {
-  CacheSettingsSchema,
   LogCategoriesSchema,
   LoggingSettingsSchema,
   LogLevelsSchema,
@@ -247,7 +246,6 @@ export type InsertMediaSourceRequest = z.infer<
 export const VersionApiResponseSchema = z.object({
   tunarr: z.string(),
   ffmpeg: z.string(),
-  nodejs: z.string(),
 });
 
 export type VersionApiResponse = z.infer<typeof VersionApiResponseSchema>;
@@ -302,7 +300,6 @@ export const UpdateSystemSettingsRequestSchema = z.object({
     })
     .optional(),
   backup: BackupSettingsSchema.optional(),
-  cache: CacheSettingsSchema.optional(),
   server: ServerSettingsSchema.optional(),
 });
 

@@ -10,12 +10,14 @@ const MARKER = '<!-- pr-policy-bot -->';
 const POLICY_URL = 'https://tunarr.com/dev/contributing/#pull-request-policy';
 const DISCLOSURE_URL = 'https://tunarr.com/dev/contributing/#disclose-ai-use';
 const NEEDS_DESIGN = 'needs design';
+const NEEDS_POLICY_FIX = 'needs policy fix';
 const DESIGN_APPROVED = 'design approved';
 const DESIGN_PROPOSAL = 'design proposal';
 const MECHANICAL = 'mechanical';
 const SIZE_LIMIT = 500;
 const SIZE_LIMIT_WITH_TESTS = 1500;
 const CLOSE_AFTER_DAYS = 30;
+const OPEN_PR_LIMIT = 5;
 const STATUS_CONTEXT = 'pr-policy';
 
 // PRs opened before the policy took effect are not checked.
@@ -183,6 +185,38 @@ async function evaluateTriggers(github, owner, repo, pr) {
   return triggers;
 }
 
+// Counts the author's ready-for-review PRs opened before this one. Drafts don't
+// count, because they aren't waiting on a reviewer. PRs from before the policy
+// start do count.
+async function olderOpenPullRequests(github, owner, repo, pr) {
+  const open = await github.paginate(github.rest.pulls.list, {
+    owner,
+    repo,
+    state: 'open',
+    per_page: 100,
+  });
+  const login = pr.user.login.toLowerCase();
+  return open.filter(
+    (p) =>
+      !p.draft &&
+      p.number !== pr.number &&
+      p.user?.login.toLowerCase() === login &&
+      Date.parse(p.created_at) < Date.parse(pr.created_at),
+  ).length;
+}
+
+async function convertToDraft(github, core, pr) {
+  if (pr.draft) return;
+  try {
+    await github.graphql(
+      'mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { clientMutationId } }',
+      { id: pr.node_id },
+    );
+  } catch (e) {
+    core.warning(`Could not convert PR to draft: ${e.message}`);
+  }
+}
+
 function referencedNumbers(body, owner, repo) {
   const numbers = new Set();
   for (const m of body.matchAll(/(?:^|[\s(])#(\d+)\b/g)) numbers.add(Number(m[1]));
@@ -191,7 +225,7 @@ function referencedNumbers(body, owner, repo) {
   return [...numbers];
 }
 
-async function labeledByHuman(github, owner, repo, number) {
+async function labeledByHuman(github, owner, repo, number, label) {
   const events = await github.paginate(github.rest.issues.listEvents, {
     owner,
     repo,
@@ -199,7 +233,7 @@ async function labeledByHuman(github, owner, repo, number) {
     per_page: 100,
   });
   const labeled = events
-    .filter((e) => e.event === 'labeled' && e.label?.name === NEEDS_DESIGN)
+    .filter((e) => e.event === 'labeled' && e.label?.name === label)
     .at(-1);
   return labeled !== undefined && labeled.actor?.type !== 'Bot';
 }
@@ -274,11 +308,12 @@ async function commitMessages(github, owner, repo, number) {
   return commits.map((c) => c.commit.message);
 }
 
-function commentBody({ triggers, designIssue, disclosed, deniedTools = [] }) {
+function commentBody({ triggers, designIssue, disclosed, deniedTools = [], olderOpen = 0 }) {
   const parts = [MARKER];
   const designBlocked = triggers.length > 0 && designIssue === undefined;
+  const overLimit = olderOpen >= OPEN_PR_LIMIT;
 
-  if (!designBlocked && disclosed && deniedTools.length === 0) {
+  if (!designBlocked && !overLimit && disclosed && deniedTools.length === 0) {
     parts.push('This PR meets the contribution policy checks. Thanks!');
     return parts.join('\n\n');
   }
@@ -299,6 +334,12 @@ function commentBody({ triggers, designIssue, disclosed, deniedTools = [] }) {
     );
   }
 
+  if (overLimit) {
+    parts.push(
+      `You already have ${olderOpen} open PRs waiting for review, and the limit is ${OPEN_PR_LIMIT} per contributor. This PR has been converted to a draft. Mark it ready for review once one of your other PRs is merged or closed.`,
+    );
+  }
+
   if (!disclosed) {
     parts.push(
       `The "AI use" section of the description is missing or empty. Say which AI tools you used and what they did, or write "No AI tools used". See [Disclose AI use](${DISCLOSURE_URL}).`,
@@ -306,6 +347,12 @@ function commentBody({ triggers, designIssue, disclosed, deniedTools = [] }) {
   } else if (deniedTools.length > 0) {
     parts.push(
       `The "AI use" section says no AI tools were used, but this PR's commits or description credit ${deniedTools.join(', ')}. Please update the "AI use" section to say what those tools did. See [Disclose AI use](${DISCLOSURE_URL}).`,
+    );
+  }
+
+  if (!disclosed || deniedTools.length > 0) {
+    parts.push(
+      `This PR has been labeled \`${NEEDS_POLICY_FIX}\`. PRs with this label are closed after 30 days without activity and a 7-day warning.`,
     );
   }
 
@@ -349,7 +396,7 @@ async function evaluatePullRequest(github, core, owner, repo, number) {
   // A maintainer may apply the label by hand for triggers the bot can't
   // detect. Only an approved design clears it. The bot's own label is dropped
   // once its triggers no longer apply.
-  if (hasLabel && triggers.length === 0 && (await labeledByHuman(github, owner, repo, pr.number))) {
+  if (hasLabel && triggers.length === 0 && (await labeledByHuman(github, owner, repo, pr.number, NEEDS_DESIGN))) {
     triggers.push(`a maintainer marked this change as needing a design`);
   }
 
@@ -360,11 +407,14 @@ async function evaluatePullRequest(github, core, owner, repo, number) {
     ? attributedTools([body, ...(await commitMessages(github, owner, repo, pr.number))])
     : [];
   const designBlocked = triggers.length > 0 && designIssue === undefined;
+  const olderOpen = await olderOpenPullRequests(github, owner, repo, pr);
+  const overLimit = olderOpen >= OPEN_PR_LIMIT;
 
   core.info(`Triggers: ${triggers.length ? triggers.join('; ') : 'none'}`);
   core.info(`Approved design issue: ${designIssue ?? 'none'}`);
   core.info(`Disclosure present: ${disclosed}`);
   core.info(`Credited tools contradicting disclosure: ${deniedTools.join(', ') || 'none'}`);
+  core.info(`Older open PRs by ${pr.user.login}: ${olderOpen} (limit ${OPEN_PR_LIMIT})`);
 
   if (designBlocked) {
     if (!hasLabel) {
@@ -374,16 +424,6 @@ async function evaluatePullRequest(github, core, owner, repo, number) {
         issue_number: pr.number,
         labels: [NEEDS_DESIGN],
       });
-    }
-    if (!pr.draft) {
-      try {
-        await github.graphql(
-          'mutation($id: ID!) { convertPullRequestToDraft(input: {pullRequestId: $id}) { clientMutationId } }',
-          { id: pr.node_id },
-        );
-      } catch (e) {
-        core.warning(`Could not convert PR to draft: ${e.message}`);
-      }
     }
   } else if (hasLabel) {
     try {
@@ -398,17 +438,49 @@ async function evaluatePullRequest(github, core, owner, repo, number) {
     }
   }
 
+  if (designBlocked || overLimit) {
+    await convertToDraft(github, core, pr);
+  }
+
+  // A hand-applied label covers violations the bot can't detect, so only a
+  // maintainer removes it.
+  const disclosureFailed = !disclosed || deniedTools.length > 0;
+  const hasPolicyLabel = pr.labels.some((l) => l.name === NEEDS_POLICY_FIX);
+  if (disclosureFailed && !hasPolicyLabel) {
+    await github.rest.issues.addLabels({
+      owner,
+      repo,
+      issue_number: pr.number,
+      labels: [NEEDS_POLICY_FIX],
+    });
+  } else if (
+    !disclosureFailed &&
+    hasPolicyLabel &&
+    !(await labeledByHuman(github, owner, repo, pr.number, NEEDS_POLICY_FIX))
+  ) {
+    try {
+      await github.rest.issues.removeLabel({
+        owner,
+        repo,
+        issue_number: pr.number,
+        name: NEEDS_POLICY_FIX,
+      });
+    } catch (e) {
+      if (e.status !== 404) throw e;
+    }
+  }
+
   await upsertComment(
     github,
     owner,
     repo,
     pr.number,
-    commentBody({ triggers, designIssue, disclosed, deniedTools }),
+    commentBody({ triggers, designIssue, disclosed, deniedTools, olderOpen }),
   );
 
   // A commit status, not a job failure, carries the result. A run started by
   // an issue label can then update the PR's status.
-  const passed = !designBlocked && disclosed && deniedTools.length === 0;
+  const passed = !designBlocked && !overLimit && disclosed && deniedTools.length === 0;
   await github.rest.repos.createCommitStatus({
     owner,
     repo,
@@ -420,9 +492,26 @@ async function evaluatePullRequest(github, core, owner, repo, number) {
   });
 }
 
+// Runs on PR events, on a `/recheck` comment, and on a manual dispatch with
+// `pr_number`. The workflow filters who may comment `/recheck`.
 async function checkPullRequest({ github, context, core }) {
   const { owner, repo } = context.repo;
-  await evaluatePullRequest(github, core, owner, repo, context.payload.pull_request.number);
+  const { payload } = context;
+  const number =
+    payload.pull_request?.number ?? payload.issue?.number ?? Number(payload.inputs?.pr_number);
+  if (!Number.isInteger(number) || number <= 0) {
+    core.setFailed(`No PR number in the ${context.eventName} event.`);
+    return;
+  }
+  if (payload.comment) {
+    await github.rest.reactions.createForIssueComment({
+      owner,
+      repo,
+      comment_id: payload.comment.id,
+      content: 'eyes',
+    });
+  }
+  await evaluatePullRequest(github, core, owner, repo, number);
 }
 
 // Runs when an issue is labeled `design approved`. Re-checks the open PRs
@@ -505,4 +594,5 @@ module.exports = {
   deniesAiUse,
   attributedTools,
   commentBody,
+  olderOpenPullRequests,
 };

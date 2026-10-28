@@ -10,7 +10,6 @@ import {
 import {
   slotHasFiller,
   slotIsLinkable,
-  type BaseMovieProgrammingSlot,
   type BaseShowProgrammingSlot,
   type BaseSlot,
   type FillerProgrammingSlot,
@@ -55,6 +54,7 @@ import { isNonEmptyArray, retrySimple } from '../../util/index.ts';
 import { LoggerFactory } from '../../util/logging/LoggerFactory.ts';
 import { FlexProgramIterator } from './FlexProgramIterator.ts';
 import {
+  minimumBreakDuration,
   resolveBreakDuration,
   resolveBreakPoints,
 } from './midRollBreakRules.ts';
@@ -107,12 +107,7 @@ export type SlotSchedulerProgram = ProgramWithRelationsOrm & {
   parentSmartCollections: string[];
 };
 
-type ContentSlotId =
-  | 'movie'
-  | 'music_video'
-  | 'other_video'
-  | `show.${string}`
-  | `artist.${string}`;
+type ContentSlotId = `show.${string}` | `artist.${string}`;
 
 export type SlotId =
   | ContentSlotId
@@ -190,10 +185,6 @@ export function createProgramMap(
     (acc, program) => {
       const id = match(program)
         .returnType<Nullable<ContentSlotId>>()
-        .with(
-          { type: P.union('movie', 'music_video', 'other_video') },
-          () => 'movie',
-        )
         .with(
           { type: 'episode', show: { uuid: P.when(isNonEmptyString) } },
           (ep) => `show.${ep.show.uuid}`,
@@ -412,7 +403,11 @@ export function createSlotProgramIterator(
       const programs =
         programBySlotType.custom[`custom-show.${slot.customShowId}` as const] ??
         [];
-      return new CustomProgramChunkedShuffle(slot.customShowId, programs);
+      return new CustomProgramChunkedShuffle(
+        slot.customShowId,
+        programs,
+        random,
+      );
     })
     .with({ type: 'custom-show' }, (slot) => {
       throw new Error(
@@ -449,14 +444,9 @@ export function createSlotProgramIterator(
       }
       return createFillerShuffleIterator(programs, slot.fillerListId, random);
     })
-    .with({ type: P.union('movie', 'show') }, (slot) => {
-      const slotId = match(slot)
-        .returnType<ContentSlotId>()
-        .with({ type: 'movie' }, () => 'movie')
-        .with({ type: 'show' }, (show) => `show.${show.showId}`)
-        .exhaustive();
-      return getContentProgramIterator(programBySlotType, slotId, slot, random);
-    })
+    .with({ type: 'show' }, (slot) =>
+      getShowProgramIterator(programBySlotType, slot, random),
+    )
     .with({ type: 'smart-collection' }, (slot) => {
       const programs =
         programBySlotType.smartCollection[
@@ -477,6 +467,7 @@ export function createSlotProgramIterator(
           return new ContentProgramChunkedShuffle(
             programs,
             getProgramOrderer('next'),
+            random,
             slot.direction === 'asc',
           );
       }
@@ -685,30 +676,27 @@ export function getFillerIteratorsForSlot(
   return out;
 }
 
-function getContentProgramIterator(
+function getShowProgramIterator(
   programBySlotType: ProgramMapping,
-  contentSlotId: ContentSlotId,
-  slot: BaseMovieProgrammingSlot | BaseShowProgrammingSlot,
+  slot: BaseShowProgrammingSlot,
   random: Random,
 ) {
   let programs = uniqBy(
-    programBySlotType.content[contentSlotId] ?? [],
+    programBySlotType.content[`show.${slot.showId}`] ?? [],
     (p) => p.uuid,
   );
 
-  if (slot.type === 'show') {
-    if (slot.seasonFilter.length > 0) {
-      programs = programs.filter((program) => {
-        const season = program.season?.index ?? program.seasonNumber;
-        return !isNil(season) && slot.seasonFilter.includes(season);
-      });
-    }
-    if (slot.seasonExcludeFilter?.length > 0) {
-      programs = programs.filter((program) => {
-        const season = program.season?.index ?? program.seasonNumber;
-        return isNil(season) || !slot.seasonExcludeFilter.includes(season);
-      });
-    }
+  if (slot.seasonFilter.length > 0) {
+    programs = programs.filter((program) => {
+      const season = program.season?.index ?? program.seasonNumber;
+      return !isNil(season) && slot.seasonFilter.includes(season);
+    });
+  }
+  if (slot.seasonExcludeFilter?.length > 0) {
+    programs = programs.filter((program) => {
+      const season = program.season?.index ?? program.seasonNumber;
+      return isNil(season) || !slot.seasonExcludeFilter.includes(season);
+    });
   }
 
   switch (slot.order) {
@@ -726,6 +714,7 @@ function getContentProgramIterator(
       return new ContentProgramChunkedShuffle(
         programs,
         getProgramOrderer('next'),
+        random,
         slot.direction === 'asc',
       );
   }
@@ -739,7 +728,6 @@ type SlotWithOrdering = StrictExtract<BaseSlot, { type: SlotTypeWithOrdering }>;
 export type SlotOrder = SlotWithOrdering['order'];
 
 export type SlotIteratorKey =
-  | `movie_${SlotOrder}`
   | `tv_${string}_${SlotOrder}`
   | `redirect_${string}`
   | `custom-show_${string}_${SlotOrder}`
@@ -975,6 +963,7 @@ export function applyMidRollBreaks(
   midRollConfig: MidRollConfig | undefined,
   random: Random,
   timeCursor: number,
+  maxBreakMs: number = Infinity,
 ): PaddedProgram[] {
   if (!midRollConfig || slot.getMidFillerListIds().length === 0) {
     return [paddedProgram];
@@ -1009,6 +998,7 @@ export function applyMidRollBreaks(
       midRollConfig,
       slot,
       random,
+      maxBreakMs,
     );
   }
   return buildEagerBreaks(
@@ -1019,7 +1009,29 @@ export function applyMidRollBreaks(
     slot,
     random,
     timeCursor,
+    maxBreakMs,
   );
+}
+
+/**
+ * Draws the next break's duration, capped by what is left of the budget. A
+ * break of zero means no further breaks fit. A capped break shorter than the
+ * configured minimum is dropped, so the budget never yields a sliver.
+ */
+function nextBreakDuration(
+  config: MidRollConfig,
+  random: Random,
+  budget: { remainingMs: number },
+): number {
+  const duration = Math.min(
+    resolveBreakDuration(config, random),
+    budget.remainingMs,
+  );
+  if (duration <= 0 || duration < minimumBreakDuration(config)) {
+    return 0;
+  }
+  budget.remainingMs -= duration;
+  return duration;
 }
 
 function buildEagerBreaks(
@@ -1030,12 +1042,19 @@ function buildEagerBreaks(
   slot: SlotImpl<BaseSlot>,
   random: Random,
   timeCursor: number,
+  maxBreakMs: number,
 ): PaddedProgram[] {
   const baseOffset = program.startOffsetMs ?? 0;
   const result: PaddedProgram[] = [];
+  const budget = { remainingMs: maxBreakMs };
   let segmentStart = 0;
 
   for (const bp of breakPoints) {
+    const breakDuration = nextBreakDuration(config, random, budget);
+    if (breakDuration <= 0) {
+      break;
+    }
+
     const segmentDuration = bp.offsetMs - segmentStart;
     result.push(
       new PaddedProgram(
@@ -1049,7 +1068,6 @@ function buildEagerBreaks(
       ),
     );
 
-    const breakDuration = resolveBreakDuration(config, random);
     const fillers = fillDurationWithFiller(slot, breakDuration, timeCursor);
 
     for (const filler of fillers.fillers) {
@@ -1098,13 +1116,20 @@ function buildLazyBreaks(
   config: MidRollConfig,
   slot: SlotImpl<BaseSlot>,
   random: Random,
+  maxBreakMs: number,
 ): PaddedProgram[] {
   const baseOffset = program.startOffsetMs ?? 0;
   const midFillerListIds = slot.getMidFillerListIds();
   const result: PaddedProgram[] = [];
+  const budget = { remainingMs: maxBreakMs };
   let segmentStart = 0;
 
   for (const bp of breakPoints) {
+    const breakDuration = nextBreakDuration(config, random, budget);
+    if (breakDuration <= 0) {
+      break;
+    }
+
     const segmentDuration = bp.offsetMs - segmentStart;
     result.push(
       new PaddedProgram(
@@ -1118,7 +1143,6 @@ function buildLazyBreaks(
       ),
     );
 
-    const breakDuration = resolveBreakDuration(config, random);
     const fillerConfig: OfflineFillerConfig = {
       fillerListIds: midFillerListIds.length > 0 ? midFillerListIds : undefined,
       origin: 'midroll',

@@ -83,7 +83,7 @@ const OnDemandChannelConfigSchema = z.object({
 
 export type OnDemandChannelConfig = z.infer<typeof OnDemandChannelConfigSchema>;
 
-export const CurrentLineupSchemaVersion = 6;
+export const CurrentLineupSchemaVersion = 7;
 
 export const LineupSchema = z.object({
   version: z
@@ -115,6 +115,11 @@ export const LineupSchema = z.object({
   // Unsure if we want this DB type to reference the
   // API type, but for now it will work.
   schedule: LineupScheduleSchema.optional(),
+
+  // Seed the slot scheduler used to generate `items` from `schedule`.
+  // Regenerating with it reproduces the same lineup. It is cleared when the
+  // items are edited by hand, so they no longer follow from the schedule.
+  scheduleSeed: z.number().array().optional(),
 
   // These are precalculated offsets in milliseconds. The
   // array is a list of the running 'total' duration sum

@@ -55,3 +55,8 @@ web/.tanstack
 
 .review*
 .pr-*
+plans/pr-*
+
+# Per-developer settings for `pnpm docker-test`
+!docker/test/.env.example
+docker/test/local.compose.yaml

@@ -1,8 +1,26 @@
-# Tunarr Web
+# Tunarr
 
-Domain language for the Tunarr client-side web application (`@tunarr/web`). This context currently covers the channel-programming editor; extend it as other packages are documented.
+Domain language for Tunarr. It covers the channel-programming editor in `@tunarr/web` and the media library lifecycle in `@tunarr/server`; extend it as other areas are documented.
 
 ## Language
+
+### Media library lifecycle
+
+**Missing**:
+The state of a program or grouping that a scan no longer finds. The row stays in the database, lineups and search until it is found again or purged.
+_Avoid_: deleted, removed, unavailable (a library state, not a program state)
+
+**Trash**:
+Every missing program and grouping, presented to the user for review before purge.
+_Avoid_: recycle bin, deleted items
+
+**Purge**:
+The permanent removal of programs and groupings, after their lineup entries have been replaced with flex. The only way program rows leave the database.
+_Avoid_: delete, cleanup, empty (except in the UI action "Empty trash")
+
+**Purge scope**:
+What a purge removes: the trash or one media source. A media source row is deleted only after its purge has emptied it.
+_Avoid_: target, filter
 
 ### Channel programming
 
@@ -21,3 +39,29 @@ _Avoid_: program map, content map
 **Editor**:
 The client working state for one editable entity (channel, custom show, or filler list): the entity's metadata plus its **Lineup**.
 _Avoid_: form, page state
+
+### Infinite schedules
+
+**Infinite schedule**:
+A named set of **Placements** that several channels can share. Each channel generates its own timeline from it, extended forever as time passes. Distinct from a **LineupSchedule**, which belongs to one channel and produces a fixed **Lineup**.
+_Avoid_: dynamic schedule, schedule template
+
+**Slot**:
+A reusable definition of what plays, in what order, and with what filler. A slot carries no timing and no length. A library slot can be placed by any number of infinite schedules. A private slot belongs to one schedule.
+_Avoid_: slot template, block
+
+**Placement**:
+One use of a **Slot** inside a **Infinite schedule**. It holds when the slot plays, how much of it plays, and how it fits the schedule's grid.
+_Avoid_: slot instance, schedule slot
+
+**Preset**:
+A built-in starting point for a new **Infinite schedule**, such as time slots or random slots. Applying a preset creates an ordinary infinite schedule, which keeps no link to the preset.
+_Avoid_: template, mode, schedule type
+
+**Spill over**:
+How far content before an anchored **Placement** may run past the anchor's start time. Beyond it, the gap before the anchor gets filler or flex instead.
+_Avoid_: overflow, run-over (in infinite schedules)
+
+**Max start delay**:
+How late an anchored **Placement** may start when earlier content ran long. Beyond it, the placement is skipped for that day.
+_Avoid_: lateness, grace period
