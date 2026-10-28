@@ -20,6 +20,10 @@ import type { PixelFormat } from './builder/format/PixelFormat.ts';
 import { PixelFormatYuv420P } from './builder/format/PixelFormat.ts';
 import { FrameSize } from './builder/types.ts';
 
+// A channel must keep the same cadence across programs, filler and error screens.
+// 60000/1001 preserves the NTSC timebase instead of rounding it to 60 fps.
+const NormalizedFrameRate = 60000 / 1001;
+
 export class FfmpegPlaybackParamsCalculator {
   constructor(
     private transcodeConfig: TranscodeConfigOrm,
@@ -98,13 +102,9 @@ export class FfmpegPlaybackParamsCalculator {
         params.needsPad = true;
       }
 
-      // We only have an option for maxFPS right now...
-      // if (
-      //   isNil(videoStream.framerate) ||
-      //   round(videoStream.framerate, 3) > this.ffmpegOptions.maxFPS
-      // ) {
-      //   params.frameRate = this.ffmpegOptions.maxFPS;
-      // }
+      if (this.transcodeConfig.normalizeFrameRate) {
+        params.frameRate = NormalizedFrameRate;
+      }
 
       params.videoTrackTimeScale = 90000;
 
@@ -138,7 +138,9 @@ export class FfmpegPlaybackParamsCalculator {
       videoBitrate: this.transcodeConfig.videoBitRate,
       videoBufferSize: this.transcodeConfig.videoBufferSize,
       videoTrackTimeScale: 90_000,
-      frameRate: 24,
+      frameRate: this.transcodeConfig.normalizeFrameRate
+        ? NormalizedFrameRate
+        : 24,
       realtime: outputFormat.type === 'hls' ? hlsRealtime : true,
     };
   }
@@ -155,7 +157,9 @@ export class FfmpegPlaybackParamsCalculator {
       videoBitrate: this.transcodeConfig.videoBitRate,
       videoBufferSize: this.transcodeConfig.videoBufferSize,
       videoTrackTimeScale: 90_000,
-      frameRate: 24,
+      frameRate: this.transcodeConfig.normalizeFrameRate
+        ? NormalizedFrameRate
+        : 24,
       realtime: false,
     };
   }

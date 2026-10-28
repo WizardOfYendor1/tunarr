@@ -2,7 +2,7 @@ import dayjs from 'dayjs';
 import duration from 'dayjs/plugin/duration.js';
 import type { TranscodeConfigOrm } from '@/db/schema/TranscodeConfig.js';
 import type { StreamDetails } from '@/stream/types.js';
-import { VideoPresets } from './builder/constants.ts';
+import { MpegTsOutputFormat, VideoPresets } from './builder/constants.ts';
 import {
   FfmpegPlaybackParamsCalculator,
   type FfmpegPlaybackParams,
@@ -77,6 +77,65 @@ function makeStreamDetails(
 }
 
 describe('FfmpegPlaybackParamsCalculator', () => {
+  describe('frame-rate normalization', () => {
+    test.each([24000 / 1001, 24, 25, 30000 / 1001, 50, 60000 / 1001, 60])(
+      'keeps the same channel target for a %s fps source',
+      (sourceRate) => {
+        const stream = makeStreamDetails();
+        const [video] = stream.videoDetails ?? [];
+        if (!video) throw new Error('Expected video details');
+        video.framerate = sourceRate;
+        const calculator = new FfmpegPlaybackParamsCalculator(
+          makeTranscodeConfig({ normalizeFrameRate: true }),
+          'mpegts',
+        );
+
+        expect(calculator.calculateForStream(stream).frameRate).toBe(
+          60000 / 1001,
+        );
+      },
+    );
+
+    test('leaves source timing alone when normalization is disabled', () => {
+      const calculator = new FfmpegPlaybackParamsCalculator(
+        makeTranscodeConfig({ normalizeFrameRate: false }),
+        'mpegts',
+      );
+      expect(
+        calculator.calculateForStream(makeStreamDetails()).frameRate,
+      ).toBeUndefined();
+    });
+
+    test.each(['hls_direct', 'hls_direct_v2'] as const)(
+      'does not force a frame rate in %s copy mode',
+      (mode) => {
+        const calculator = new FfmpegPlaybackParamsCalculator(
+          makeTranscodeConfig({ normalizeFrameRate: true }),
+          mode,
+        );
+        const params = calculator.calculateForStream(makeStreamDetails());
+        expect(params.videoFormat).toBe('copy');
+        expect(params.frameRate).toBeUndefined();
+      },
+    );
+
+    test.each([true, false])(
+      'uses the channel target for error screens and concat when enabled=%s',
+      (enabled) => {
+        const calculator = new FfmpegPlaybackParamsCalculator(
+          makeTranscodeConfig({ normalizeFrameRate: enabled }),
+          'mpegts',
+        );
+        const expected = enabled ? 60000 / 1001 : 24;
+        expect(
+          calculator.calculateForErrorStream(MpegTsOutputFormat, false)
+            .frameRate,
+        ).toBe(expected);
+        expect(calculator.calculateForHlsConcat().frameRate).toBe(expected);
+      },
+    );
+  });
+
   describe('calculateForStream', () => {
     test('sets videoPreset to veryfast for software h264 encoding', () => {
       const config = makeTranscodeConfig({

@@ -81,7 +81,7 @@ A common starting point is roughly **2× the video bitrate** (e.g., 4000 kb buff
 
 ### Normalize Frame Rate
 
-When enabled, forces the output stream to a consistent frame rate (e.g., 23.976, 29.97, or 60 fps). This is recommended for most setups, as mixing frame rates across lineup items can cause playback issues or stuttering with some clients.
+When enabled, transcodes every program, filler item, and error screen to a constant **59.94 fps (60000/1001)**. The target does not change with each source file, keeping the channel cadence consistent across lineup boundaries. Frames are duplicated or dropped as needed; playback speed is unchanged. This setting requires video transcoding and does not apply to direct or remux streams. Disable it to preserve source frame rates.
 
 ### Deinterlace Video
 

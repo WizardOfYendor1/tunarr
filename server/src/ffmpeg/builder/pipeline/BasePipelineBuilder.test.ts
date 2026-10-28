@@ -81,6 +81,29 @@ describe('BasePipelineBuilder', () => {
     scaledSize: FrameSize.FHD,
   });
 
+  test('emits an explicit CFR output rate for normalized video', () => {
+    const builder = new NoopPipelineBuilder(
+      video,
+      audio,
+      null,
+      null,
+      null,
+      EmptyFfmpegCapabilities,
+    );
+    const result = builder.build(
+      state,
+      new FrameState({
+        ...frameState,
+        videoFormat: 'mpeg2video',
+        frameRate: 60000 / 1001,
+      }),
+      DefaultPipelineOptions,
+    );
+    const args = result.getCommandArgs();
+    expect(args[args.indexOf('-r') + 1]).toBe((60000 / 1001).toString());
+    expect(args[args.indexOf('-fps_mode') + 1]).toBe('cfr');
+  });
+
   test('set audio volume filter', () => {
     const audio = AudioInputSource.withStream(
       new FileStreamSource('/path/to/song.flac'),

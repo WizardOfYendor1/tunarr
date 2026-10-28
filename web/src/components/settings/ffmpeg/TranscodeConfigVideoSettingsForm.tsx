@@ -255,7 +255,7 @@ export const TranscodeConfigVideoSettingsForm = ({
             <field.BasicCheckboxInput
               label={t`Normalize Frame Rate`}
               formControlProps={{ fullWidth: true }}
-              helperText={t`Output video at a constant frame rate.`}
+              helperText={t`Output all programs at a constant 59.94 fps. Requires video transcoding; direct and remux streams keep their source frame rate.`}
             />
           )}
         />

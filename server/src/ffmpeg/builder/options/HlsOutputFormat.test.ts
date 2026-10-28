@@ -25,6 +25,23 @@ function makeFormat(
 }
 
 describe('HlsOutputFormat', () => {
+  test.each([false, true])(
+    'uses integer GOP options at 59.94 fps (QSV=%s)',
+    (oneSecondGop) => {
+      const state = new FrameState({ frameRate: 60000 / 1001 });
+      const opts = new HlsOutputFormat(
+        state,
+        24,
+        '/stream.m3u8',
+        '/data%06d.ts',
+        '/stream/',
+        true,
+        oneSecondGop,
+      ).options();
+      expect(opts[opts.indexOf('-g') + 1]).toBe(oneSecondGop ? '60' : '240');
+      expect(opts[opts.indexOf('-keyint_min') + 1]).toBe('240');
+    },
+  );
   test('includes -master_pl_name playlist.m3u8 for first transcode', () => {
     const opts = makeFormat(true).options();
     const idx = opts.indexOf('-master_pl_name');
